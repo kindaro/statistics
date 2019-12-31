@@ -65,7 +65,7 @@ niceBpm :: RealFrac a => a -> a
 niceBpm = (30 /)
 
 mse :: RealFrac a => NonEmpty (a, a) -> a
-mse = avg . fmap (deviation 0 . uncurry (-))
+mse = avg . fmap (uncurry deviation)
 
 avg :: RealFrac a => NonEmpty a -> a
 avg xs = sum xs / (fromIntegral . length) xs
