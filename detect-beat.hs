@@ -1,76 +1,78 @@
 {-# language TypeApplications #-}
+{-# language OverloadedLists #-}
 
 module Main where
 
 import Control.Monad
 import System.Process
 import Data.Function
-import Data.List
+-- import Data.List
 import System.Environment
 import Data.Maybe
-import Data.Foldable
+-- import Data.Foldable
 import System.Random.Shuffle
+import Data.List.NonEmpty (NonEmpty, nonEmpty)
+import qualified Data.List.NonEmpty as NonEmpty
 
-getData :: FilePath -> IO [Double]
+getData :: FilePath -> IO (NonEmpty Double)
 getData target = do
     raw <- readCreateProcess (proc "aubiotrack" [target]) ""
-    let xs = raw & lines & fmap read
-    return xs
+    raw & lines & fmap read & checkNonEmpty
 
 main :: IO ()
 main = do
     target <- fmap head getArgs
     u  <- getData target
-    let v = zip [1..] u
-    v' <- shuffleM v
-    let (train, check) = splitAt (length v' `div` 2) v'
-        Just slope = linearSlope train
+    let v = NonEmpty.zip [1..] u
+    v' <- (fmap NonEmpty.fromList . shuffleM . NonEmpty.toList) v
+    let (train', check') = NonEmpty.splitAt (length v' `div` 2) v'
+    train <- checkNonEmpty train'
+    check <- checkNonEmpty check'
+    let slope = linearSlope train
         f = linearFit train
-        Just error = validate check f
+        error = validate check f
     print (slope, error)
 
-sigma :: Num b => (a -> b) -> [a] -> b
+sigma :: (Functor f, Foldable f, Num b) => (a -> b) -> f a -> b
 sigma f = sum . fmap f
 
-linearSlope :: RealFrac a => [(a, a)] -> Maybe a
-linearSlope v = do
-    let (xs, ys) = unzip v
-    avgx <- avg xs
-    avgy <- avg ys
-    let termAbove (x, y) = (x - avgx) * (y - avgy)
-        termBelow (x, y) = (x - avgx)^2
-    return $ sigma termAbove v / sigma termBelow v
+linearSlope :: RealFrac a => NonEmpty (a, a) -> a
+linearSlope v = sigma termAbove v / sigma termBelow v
+  where
+    (xs, ys) = NonEmpty.unzip v
+    avgx = avg xs
+    avgy = avg ys
+    termAbove (x, y) = (x - avgx) * (y - avgy)
+    termBelow (x, y) = (x - avgx)^2
 
-linearIntercept :: RealFrac a => [(a, a)] -> Maybe a
-linearIntercept v = do
-    let (xs, ys) = unzip v
-    avgx  <- avg xs
-    avgy  <- avg ys
-    slope <- linearSlope v
-    return $ avgy - slope * avgx
+linearIntercept :: RealFrac a => NonEmpty (a, a) -> a
+linearIntercept v = avgy - slope * avgx
+  where
+    (xs, ys) = NonEmpty.unzip v
+    avgx = avg xs
+    avgy = avg ys
+    slope = linearSlope v
 
-linearFit :: RealFrac a => [(a, a)] -> a -> Maybe a
-linearFit v x = do
-    slope     <- linearSlope v
-    intercept <- linearIntercept v
-    return $ intercept + slope * x
+linearFit :: RealFrac a => NonEmpty (a, a) -> a -> a
+linearFit v x = intercept + slope * x
+  where
+    slope = linearSlope v
+    intercept = linearIntercept v
 
-validate :: RealFrac a => [(a, a)] -> (a -> Maybe a) -> Maybe a
-validate v f = do
-    let (xs, ys) = unzip v
-    predictions <- traverse f xs
-    error <- mse (zip predictions ys)
-    return error
+validate :: RealFrac a => NonEmpty (a, a) -> (a -> a) -> a
+validate v f = mse (NonEmpty.zip predictions ys)
+  where
+    (xs, ys) = NonEmpty.unzip v
+    predictions = fmap f xs
 
 niceBpm :: RealFrac a => a -> a
 niceBpm = (30 /)
 
-mse :: RealFrac a => [(a, a)] -> Maybe a
+mse :: RealFrac a => NonEmpty (a, a) -> a
 mse = avg . fmap (deviation 0 . uncurry (-))
 
-avg :: RealFrac a => [a] -> Maybe a
-avg [ ] = Nothing
-avg xs = Just $ sum xs / (fromIntegral . length) xs
+avg :: RealFrac a => NonEmpty a -> a
+avg xs = sum xs / (fromIntegral . length) xs
 
 delta :: Num a => [a] -> [a]
 delta (x: x': xs) = x' - x: delta (x': xs)
@@ -82,15 +84,10 @@ diag x = (x, x)
 deviation :: RealFrac a => a -> a -> a
 deviation z x = (x - z)^2
 
-avgDeviation :: RealFrac a => [a] -> Maybe a
-avgDeviation xs = do
-    average <- avg xs
-    let deviations = fmap (deviation average) xs
-    avg deviations
+avgDeviation :: RealFrac a => NonEmpty a -> a
+avgDeviation xs = avg deviations
+  where
+    deviations = fmap (deviation (avg xs)) xs
 
-removeFarthest :: RealFrac a => [a] -> Maybe [a]
-removeFarthest [ ] = Nothing
-removeFarthest xs = do
-    average <- avg xs
-    let farthest = maximumBy (compare `on` deviation average) xs
-    return $ delete farthest xs
+checkNonEmpty :: [a] -> IO (NonEmpty a)
+checkNonEmpty = maybe (fail "Error: Empty list.") return . nonEmpty
