@@ -8,32 +8,65 @@ import Data.Function
 import Data.List
 import System.Environment
 import Data.Maybe
+import Data.Foldable
+import System.Random.Shuffle
 
-getData :: IO [Double]
-getData = do
-    target <- fmap head getArgs
+getData :: FilePath -> IO [Double]
+getData target = do
     raw <- readCreateProcess (proc "aubiotrack" [target]) ""
     let xs = raw & lines & fmap read
     return xs
 
 main :: IO ()
 main = do
-    xs <- getData
-    print (length xs)
-    let
-        delays = delta xs
-        shelfs = unfoldr (fmap diag . removeFarthest) delays
-        averageDeviations = (catMaybes . fmap avgDeviation) shelfs
-        d2s = (delta . delta) averageDeviations
-        Just cutPoint = elemIndex (maximum d2s) d2s
-        niceShelf = (last . take cutPoint) shelfs
-        Just niceAverage = avg niceShelf
-    print (length niceShelf)
-    print (niceBpm niceAverage)
+    target <- fmap head getArgs
+    u  <- getData target
+    let v = zip [1..] u
+    v' <- shuffleM v
+    let (train, check) = splitAt (length v' `div` 2) v'
+        Just slope = linearSlope train
+        f = linearFit train
+        Just error = validate check f
+    print (slope, error)
 
+sigma :: Num b => (a -> b) -> [a] -> b
+sigma f = sum . fmap f
+
+linearSlope :: RealFrac a => [(a, a)] -> Maybe a
+linearSlope v = do
+    let (xs, ys) = unzip v
+    avgx <- avg xs
+    avgy <- avg ys
+    let termAbove (x, y) = (x - avgx) * (y - avgy)
+        termBelow (x, y) = (x - avgx)^2
+    return $ sigma termAbove v / sigma termBelow v
+
+linearIntercept :: RealFrac a => [(a, a)] -> Maybe a
+linearIntercept v = do
+    let (xs, ys) = unzip v
+    avgx  <- avg xs
+    avgy  <- avg ys
+    slope <- linearSlope v
+    return $ avgy - slope * avgx
+
+linearFit :: RealFrac a => [(a, a)] -> a -> Maybe a
+linearFit v x = do
+    slope     <- linearSlope v
+    intercept <- linearIntercept v
+    return $ intercept + slope * x
+
+validate :: RealFrac a => [(a, a)] -> (a -> Maybe a) -> Maybe a
+validate v f = do
+    let (xs, ys) = unzip v
+    predictions <- traverse f xs
+    error <- mse (zip predictions ys)
+    return error
 
 niceBpm :: RealFrac a => a -> a
 niceBpm = (30 /)
+
+mse :: RealFrac a => [(a, a)] -> Maybe a
+mse = avg . fmap (deviation 0 . uncurry (-))
 
 avg :: RealFrac a => [a] -> Maybe a
 avg [ ] = Nothing
