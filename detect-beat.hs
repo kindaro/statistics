@@ -3,13 +3,9 @@
 
 module Main where
 
-import Control.Monad
 import System.Process
 import Data.Function
--- import Data.List
 import System.Environment
-import Data.Maybe
--- import Data.Foldable
 import System.Random.Shuffle
 import Data.List.NonEmpty (NonEmpty, nonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
@@ -28,10 +24,10 @@ main = do
     let (train', check') = NonEmpty.splitAt (length v' `div` 2) v'
     train <- checkNonEmpty train'
     check <- checkNonEmpty check'
-    let slope = linearSlope train
+    let period = linearSlope train
         f = linearFit train
-        error = validate check f
-    print (slope, error)
+        e = validate check f
+    print (period, niceBpm period, e)
 
 sigma :: (Functor f, Foldable f, Num b) => (a -> b) -> f a -> b
 sigma f = sum . fmap f
@@ -43,7 +39,7 @@ linearSlope v = sigma termAbove v / sigma termBelow v
     avgx = avg xs
     avgy = avg ys
     termAbove (x, y) = (x - avgx) * (y - avgy)
-    termBelow (x, y) = (x - avgx)^2
+    termBelow (x, _) = deviation x avgx
 
 linearIntercept :: RealFrac a => NonEmpty (a, a) -> a
 linearIntercept v = avgy - slope * avgx
@@ -82,7 +78,7 @@ diag :: a -> (a, a)
 diag x = (x, x)
 
 deviation :: RealFrac a => a -> a -> a
-deviation z x = (x - z)^2
+deviation z x = (x - z)^(2 :: Int)
 
 avgDeviation :: RealFrac a => NonEmpty a -> a
 avgDeviation xs = avg deviations
