@@ -1,6 +1,7 @@
 {-# language TypeApplications #-}
 {-# language OverloadedLists #-}
 {-# language ScopedTypeVariables #-}
+{-# language GeneralizedNewtypeDeriving #-}
 
 module Main where
 
@@ -32,7 +33,8 @@ main = do
     u <- getData target
     v <- (checkNonEmpty . delta . NonEmpty.toList) u
     classes <- kMeans k v
-    print @Double $ niceBpm . avg . List.maximumBy (compare `on` length) . NonEmpty.toList $ classes
+    let period = avg . List.maximumBy (compare `on` length) . NonEmpty.toList $ classes
+    print (period, niceBpm period)
 
 niceBpm :: RealFrac a => a -> a
 niceBpm = (30 /)
@@ -50,6 +52,9 @@ deviation z x = (x - z)^(2 :: Int)
 checkNonEmpty :: [a] -> IO (NonEmpty a)
 checkNonEmpty = maybe (fail "Error: Empty list.") return . nonEmpty
 
+newtype ValueId = ValueId { valueId :: Int } deriving (Eq, Ord, Num, Enum, Random)
+newtype ClassId = ClassId { classId :: Int } deriving (Eq, Ord, Num, Enum, Random)
+
 kMeans :: forall a. (RealFrac a, Enum a) => Int -> NonEmpty a -> IO (NonEmpty (NonEmpty a))
 kMeans k xs
     | k > length xs = fail "Error: less values than classes."
@@ -57,17 +62,17 @@ kMeans k xs
 
         let xsMap  -- Resolves a value index to its value.
                 = enumerate xs
-                    :: Map Int a
+                    :: Map ValueId a
 
-        maybeInitialClasses <- assignRandom1 (Set.fromList . Map.keys $ xsMap) [1.. k]
-        initialClasses  -- ValueId -> ClassId
+        maybeInitialClasses <- assignRandom1 (Set.fromList . Map.keys $ xsMap) [1.. ClassId k]
+        initialClasses
             <- maybe (fail "Logic error: k seems to be > length xs.") return maybeInitialClasses
-                :: IO (Map Int Int)
+                :: IO (Map ValueId ClassId)
 
-        let innerLoop :: Map Int Int -> Map Int Int
+        let innerLoop :: Map ValueId ClassId -> Map ValueId ClassId
             innerLoop = selectClosest . makeDistanceMap xsMap . makeCentroidMap xsMap
 
-            fitting :: (Int, NonEmpty Int) -> (NonEmpty a)
+            fitting :: (ClassId, NonEmpty ValueId) -> (NonEmpty a)
             fitting = fmap (xsMap Map.!) . snd
 
         return $ (fmap fitting . NonEmpty.fromList . fibers . fixp innerLoop) initialClasses
@@ -76,7 +81,7 @@ kMeans k xs
 
     -- | Assign random values such that each is used at least once. The idea is to append a random
     -- tail to the rainbow of values and shuffle. Tail gets shuffled twice, but whatever.
-    assignRandom1 :: (Ord k, Ord v) => Set k -> Set v -> IO (Maybe (Map k v))
+    assignRandom1 :: forall k v. (Ord k, Ord v) => Set k -> Set v -> IO (Maybe (Map k v))
     assignRandom1 ks vs
         | length vs > length ks = return Nothing
         | otherwise = do
@@ -84,36 +89,29 @@ kMeans k xs
             rs' <- shuffleM (Map.keys vMap ++ take (length ks - length (Map.keys vMap)) rs)
             return . Just $ Map.fromList (zip (Set.toList ks) (fmap (vMap Map.!) rs'))
       where
+        vMap :: Map ValueId v
         vMap = enumerate (Set.toList vs)
-        randomSequence :: IO [Int]
+        randomSequence :: IO [ValueId]
         randomSequence = do
             gen <- getStdGen
             return $ randomRs (minimum (Map.keys vMap), maximum (Map.keys vMap)) gen
 
-    makeCentroidMap
-        :: Map Int a    -- ValueId -> Value
-        -> Map Int Int  -- ValueId -> ClassId
-        -> Map Int a    -- ClassId -> Centroid
+    makeCentroidMap :: Map ValueId a -> Map ValueId ClassId -> Map ClassId a
     makeCentroidMap xsMap = Map.fromList . (fmap . fmap) (avg . fitting) . fibers
       where
-        fitting :: NonEmpty Int -> NonEmpty a
+        fitting :: NonEmpty ValueId -> NonEmpty a
         fitting = fmap (xsMap Map.!)
 
-    makeDistanceMap
-        :: Map Int a  -- ValueId -> Value
-        -> Map Int a  -- ClassId -> Centroid
-        -> Map (Int, Int) a  -- (ValueId, ClassId) -> Distance
+    makeDistanceMap :: Map ValueId a -> Map ClassId a -> Map (ValueId, ClassId) a
     makeDistanceMap xsMap centroidMap = Map.fromSet f ks
       where
-        ks :: Set (Int, Int)
+        ks :: Set (ValueId, ClassId)
         ks = Set.fromList (liftA2 (,) (Map.keys xsMap) (Map.keys centroidMap))
 
-        f :: (Int, Int) -> a
+        f :: (ValueId, ClassId) -> a
         f (i, j) = deviation (xsMap Map.! i) (centroidMap Map.! j)
 
-    selectClosest
-        :: Map (Int, Int) a  -- (ValueId, ClassId) -> Distance
-        -> Map Int Int       -- ValueId -> ClassId
+    selectClosest :: Map (ValueId, ClassId) a -> Map ValueId ClassId
     selectClosest = fmap (fst . List.minimumBy (compare `on` snd) . Map.toList) . curryMap
 
 curryMap :: forall k1 k2 v. (Ord k1, Ord k2) => Map (k1, k2) v -> Map k1 (Map k2 v)
@@ -123,7 +121,7 @@ curryMap = Map.fromList . fmap fitting . classifyBy ((==) `on` (fst . fst)) . Ma
     fitting xs@ (((k, _), _) :| _)
                 = (k, (Map.fromList . NonEmpty.toList . fmap (bimap snd id)) xs)
 
-enumerate :: Foldable f => f a -> Map Int a
+enumerate :: (Foldable f, Ord i, Num i, Enum i) => f a -> Map i a
 enumerate = Map.fromList . zip [1..] . toList
 
 fibers :: forall k v. (Ord k, Ord v) => Map k v -> [(v, NonEmpty k)]
