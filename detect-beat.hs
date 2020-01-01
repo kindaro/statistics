@@ -2,24 +2,24 @@
 {-# language OverloadedLists #-}
 {-# language ScopedTypeVariables #-}
 {-# language GeneralizedNewtypeDeriving #-}
+{-# language BlockArguments #-}
 
 module Main where
 
-import Control.Applicative
-import Data.Bifunctor
 import Data.Foldable
 import Data.Function
 import Data.List.NonEmpty (NonEmpty(..), nonEmpty)
-import Data.Map.Strict (Map)
-import Data.Set (Set)
 import qualified Data.List as List
 import qualified Data.List.NonEmpty as NonEmpty
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 import System.Environment
 import System.Process
 import System.Random
 import System.Random.Shuffle
+import qualified Data.Array as Array
+import Data.Array.MArray (newListArray, readArray, writeArray)
+import Data.Array.ST (runSTArray)
+import GHC.ST (ST)
+import Data.Maybe
 
 getData :: FilePath -> IO (NonEmpty Double)
 getData target = do
@@ -31,9 +31,9 @@ main = do
     [target, k'] <- getArgs
     let k = read k'
     u <- getData target
-    v <- (checkNonEmpty . delta . NonEmpty.toList) u
+    let v = (delta . NonEmpty.toList) u
     classes <- kMeans k v
-    let period = avg . List.maximumBy (compare `on` length) . NonEmpty.toList $ classes
+    let period = avg . List.maximumBy (compare `on` length) $ classes
     print (period, niceBpm period)
 
 niceBpm :: RealFrac a => a -> a
@@ -52,83 +52,40 @@ deviation z x = (x - z)^(2 :: Int)
 checkNonEmpty :: [a] -> IO (NonEmpty a)
 checkNonEmpty = maybe (fail "Error: Empty list.") return . nonEmpty
 
-newtype ValueId = ValueId { valueId :: Int } deriving (Eq, Ord, Num, Enum, Random)
-newtype ClassId = ClassId { classId :: Int } deriving (Eq, Ord, Num, Enum, Random)
-
-kMeans :: forall a. (RealFrac a, Enum a) => Int -> NonEmpty a -> IO (NonEmpty (NonEmpty a))
+kMeans :: (RealFrac a, Enum a) => Int -> [a] -> IO [NonEmpty a]
 kMeans k xs
-    | k > length xs = fail "Error: less values than classes."
+    | length xs < k = fail "Error: less values than classes."
     | otherwise = do
+        z <- kRandom k xs
+        let z' = fixp (flip classifyByNearest xs . fmap avg) z
+        return z'
 
-        let xsMap  -- Resolves a value index to its value.
-                = enumerate xs
-                    :: Map ValueId a
+atLeastOneOfEach :: Int -> Int -> IO [Int]
+atLeastOneOfEach k n = do
+    gen <- getStdGen
+    oneOfEach <- shuffleM [1.. k]
+    let anyNumberOfEach = randomRs (1, k) gen
+    shuffleM (oneOfEach ++ take (n - k) anyNumberOfEach)
 
-        maybeInitialClasses <- assignRandom1 (Set.fromList . Map.keys $ xsMap) [1.. ClassId k]
-        initialClasses
-            <- maybe (fail "Logic error: k seems to be > length xs.") return maybeInitialClasses
-                :: IO (Map ValueId ClassId)
+kRandom :: Int -> [a] -> IO [NonEmpty a]
+kRandom k xs = do
+    rs <- atLeastOneOfEach k (length xs)
+    return $ (fmap.fmap) snd . classifyBy ((==) `on` fst) . zip rs $ xs
 
-        let innerLoop :: Map ValueId ClassId -> Map ValueId ClassId
-            innerLoop = selectClosest . makeDistanceMap xsMap . makeCentroidMap xsMap
+classifyByNearest :: forall a. (Ord a, Num a) => [a] -> [a] -> [NonEmpty a]
+classifyByNearest centroids xs = catMaybes . fmap nonEmpty . Array.elems $ runSTArray do
+    v <- newListArray (0, length centroids - 1) (repeat mempty)
+    let f :: a -> ST _ ()
+        f x = do
+            ys <- readArray v i
+            writeArray v i (x: ys)
+          where
+            i = indexOfMinimum (fmap (deviation x) centroids)
+    traverse_ f xs
+    return v
 
-            fitting :: (ClassId, NonEmpty ValueId) -> (NonEmpty a)
-            fitting = fmap (xsMap Map.!) . snd
-
-        return $ (fmap fitting . NonEmpty.fromList . fibers . fixp innerLoop) initialClasses
-
-  where
-
-    -- | Assign random values such that each is used at least once. The idea is to append a random
-    -- tail to the rainbow of values and shuffle. Tail gets shuffled twice, but whatever.
-    assignRandom1 :: forall k v. (Ord k, Ord v) => Set k -> Set v -> IO (Maybe (Map k v))
-    assignRandom1 ks vs
-        | length vs > length ks = return Nothing
-        | otherwise = do
-            rs <- randomSequence
-            rs' <- shuffleM (Map.keys vMap ++ take (length ks - length (Map.keys vMap)) rs)
-            return . Just $ Map.fromList (zip (Set.toList ks) (fmap (vMap Map.!) rs'))
-      where
-        vMap :: Map ValueId v
-        vMap = enumerate (Set.toList vs)
-        randomSequence :: IO [ValueId]
-        randomSequence = do
-            gen <- getStdGen
-            return $ randomRs (minimum (Map.keys vMap), maximum (Map.keys vMap)) gen
-
-    makeCentroidMap :: Map ValueId a -> Map ValueId ClassId -> Map ClassId a
-    makeCentroidMap xsMap = Map.fromList . (fmap . fmap) (avg . fitting) . fibers
-      where
-        fitting :: NonEmpty ValueId -> NonEmpty a
-        fitting = fmap (xsMap Map.!)
-
-    makeDistanceMap :: Map ValueId a -> Map ClassId a -> Map (ValueId, ClassId) a
-    makeDistanceMap xsMap centroidMap = Map.fromSet f ks
-      where
-        ks :: Set (ValueId, ClassId)
-        ks = Set.fromList (liftA2 (,) (Map.keys xsMap) (Map.keys centroidMap))
-
-        f :: (ValueId, ClassId) -> a
-        f (i, j) = deviation (xsMap Map.! i) (centroidMap Map.! j)
-
-    selectClosest :: Map (ValueId, ClassId) a -> Map ValueId ClassId
-    selectClosest = fmap (fst . List.minimumBy (compare `on` snd) . Map.toList) . curryMap
-
-curryMap :: forall k1 k2 v. (Ord k1, Ord k2) => Map (k1, k2) v -> Map k1 (Map k2 v)
-curryMap = Map.fromList . fmap fitting . classifyBy ((==) `on` (fst . fst)) . Map.toList
-  where
-    fitting :: NonEmpty ((k1, k2), v) -> (k1, Map k2 v)
-    fitting xs@ (((k, _), _) :| _)
-                = (k, (Map.fromList . NonEmpty.toList . fmap (bimap snd id)) xs)
-
-enumerate :: (Foldable f, Ord i, Num i, Enum i) => f a -> Map i a
-enumerate = Map.fromList . zip [1..] . toList
-
-fibers :: forall k v. (Ord k, Ord v) => Map k v -> [(v, NonEmpty k)]
-fibers = fmap fitting . classifyBy ((==) `on` snd) . Map.toList
-  where
-    fitting :: NonEmpty (k, v) -> (v, NonEmpty k)
-    fitting ((k, v) :| kvs) = (v, k :| fmap fst kvs)
+indexOfMinimum :: Ord a => [a] -> Int
+indexOfMinimum xs = let x = List.minimum xs; Just i = List.elemIndex x xs in i
 
 classifyBy :: forall a f. Foldable f => (a -> a -> Bool) -> f a -> [NonEmpty a]
 classifyBy eq = List.foldl' f [ ]
