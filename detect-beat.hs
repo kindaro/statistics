@@ -3,6 +3,7 @@
 {-# language ScopedTypeVariables #-}
 {-# language GeneralizedNewtypeDeriving #-}
 {-# language BlockArguments #-}
+{-# language PartialTypeSignatures #-}
 
 module Main where
 
