@@ -10,7 +10,6 @@ import Data.Foldable
 import Data.Function
 import Data.List.NonEmpty (NonEmpty(..), nonEmpty)
 import qualified Data.List as List
-import qualified Data.List.NonEmpty as NonEmpty
 import System.Environment
 import System.Process
 import System.Random
@@ -21,19 +20,27 @@ import Data.Array.ST (runSTArray)
 import GHC.ST (ST)
 import Data.Maybe
 
-getData :: FilePath -> IO (NonEmpty Double)
-getData target = do
-    raw <- readCreateProcess (proc "aubiotrack" [target]) ""
-    raw & lines & fmap read & checkNonEmpty
+initialize :: IO (String, String)
+initialize = do
+    args <- getArgs
+    case args of
+        [target, k'] -> do
+            u' <- readCreateProcess (proc "aubiotrack" [target]) ""
+            return (u', k')
+        [k'] -> do
+            u' <- getContents
+            return (u', k')
+        _ -> fail $ "Usage: detect-beat [file] nclasses.\n\
+                    \If audio file is given, extract beats. Otherwise, read beats from StdIn."
 
 main :: IO ()
 main = do
-    [target, k'] <- getArgs
+    (u', k') <- initialize
     let k = read k'
-    u <- getData target
-    let v = (delta . NonEmpty.toList) u
+        u = (fmap (read @Double) . lines) u'
+        v = delta u
     classes <- kMeans k v
-    let period = avg . List.maximumBy (compare `on` length) $ classes
+    let period = (avg . List.maximumBy (compare `on` length)) classes
     print (period, niceBpm period)
 
 niceBpm :: RealFrac a => a -> a
