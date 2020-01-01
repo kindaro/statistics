@@ -21,19 +21,27 @@ import System.Process
 import System.Random
 import System.Random.Shuffle
 
-getData :: FilePath -> IO (NonEmpty Double)
-getData target = do
-    raw <- readCreateProcess (proc "aubiotrack" [target]) ""
-    raw & lines & fmap read & checkNonEmpty
+initialize :: IO (String, String)
+initialize = do
+    args <- getArgs
+    case args of
+        [target, k'] -> do
+            u' <- readCreateProcess (proc "aubiotrack" [target]) ""
+            return (u', k')
+        [k'] -> do
+            u' <- getContents
+            return (u', k')
+        _ -> fail $ "Usage: detect-beat [file] nclasses.\n\
+                    \If audio file is given, extract beats. Otherwise, read beats from StdIn."
 
 main :: IO ()
 main = do
-    [target, k'] <- getArgs
+    (u', k') <- initialize
     let k = read k'
-    u <- getData target
-    v <- (checkNonEmpty . delta . NonEmpty.toList) u
+        u = (fmap (read @Double) . lines) u'
+    v <- (checkNonEmpty . delta) u
     classes <- kMeans k v
-    let period = avg . List.maximumBy (compare `on` length) . NonEmpty.toList $ classes
+    let period = (avg . List.maximumBy (compare `on` length)) classes
     print (period, niceBpm period)
 
 niceBpm :: RealFrac a => a -> a
