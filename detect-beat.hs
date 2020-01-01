@@ -10,6 +10,7 @@ module Main where
 import Data.Foldable
 import Data.Function
 import Data.List.NonEmpty (NonEmpty(..), nonEmpty)
+import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.List as List
 import System.Environment
 import System.Process
@@ -40,7 +41,7 @@ main = do
     let k = read k'
         u = (fmap (read @Double) . lines) u'
         v = delta u
-    classes <- kMeans k v
+    classes <- kMeansRandom k v
     let period = (avg . List.maximumBy (compare `on` length)) classes
     print (period, niceBpm period)
 
@@ -58,27 +59,35 @@ deviation :: Num a => a -> a -> a
 deviation z x = (x - z)^(2 :: Int)
 
 checkNonEmpty :: [a] -> IO (NonEmpty a)
-checkNonEmpty = maybe (fail "Error: Empty list.") return . nonEmpty
+checkNonEmpty = maybe (fail "Empty list.") return . nonEmpty
 
-kMeans :: (RealFrac a, Enum a) => Int -> [a] -> IO [NonEmpty a]
-kMeans k xs
-    | length xs < k = fail "Error: less values than classes."
-    | otherwise = do
-        z <- kRandom k xs
-        let z' = fixp (flip classifyByNearest xs . fmap avg) z
-        return z'
+kMeans :: RealFrac a => [NonEmpty a] -> Maybe [NonEmpty a]
+kMeans xs | (length . List.nub . fmap avg) xs /= length xs = Nothing
+          | otherwise = Just (fixp (classifyByNearest (concatMap NonEmpty.toList xs) . fmap avg) xs)
 
-atLeastOneOfEach :: Int -> Int -> IO [Int]
-atLeastOneOfEach k n = do
-    gen <- getStdGen
-    oneOfEach <- shuffleM [1.. k]
-    let anyNumberOfEach = randomRs (1, k) gen
-    shuffleM (oneOfEach ++ take (n - k) anyNumberOfEach)
+-- | There are some choices of data for which there may not be a way to find enough clusters,
+-- depending on the way the initial clusters get assigned. For example, consider k = 2 and [1, 2,
+-- 3, 4]: if initial clusters are randomly assigned [1, 4] and [2, 3], one of them will absorb the
+-- other in the next iteration of the algorithm. In such case an error will be thrown. Hopefully,
+-- situations like this occur negligibly rarely in real data. In any way, you may provide your own
+-- initial partition to `kMeans` which does otherwise the same.
 
-kRandom :: Int -> [a] -> IO [NonEmpty a]
-kRandom k xs = do
-    rs <- atLeastOneOfEach k (length xs)
-    return $ (fmap.fmap) snd . classifyBy ((==) `on` fst) . zip rs $ xs
+kMeansRandom :: (RealFrac a, Enum a) => Int -> [a] -> IO [NonEmpty a]
+kMeansRandom = (fmap . fmap) (check . kMeans) . kRandom
+  where
+    check = fromMaybe (fail "Initial cluster centroids coincide.")
+
+    kRandom :: Int -> [a] -> IO [NonEmpty a]
+    kRandom k xs = do
+        rs <- atLeastOneOfEach k (length xs)
+        return $ (fmap.fmap) snd . classifyBy ((==) `on` fst) . zip rs $ xs
+
+    atLeastOneOfEach :: Int -> Int -> IO [Int]
+    atLeastOneOfEach k n = do
+        gen <- getStdGen
+        oneOfEach <- shuffleM [1.. k]
+        let anyNumberOfEach = randomRs (1, k) gen
+        shuffleM (oneOfEach ++ take (n - k) anyNumberOfEach)
 
 classifyByNearest :: forall a. (Ord a, Num a) => [a] -> [a] -> [NonEmpty a]
 classifyByNearest centroids xs = catMaybes . fmap nonEmpty . Array.elems $ runSTArray do
